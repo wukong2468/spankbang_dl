@@ -1,0 +1,28 @@
+# 浏览器 profile（每个并行解析进程一份，体积很大）
+profiles/
+cache/
+.tmp/
+_pw_profile/
+_cf_profiles/
+
+# 下载产物
+Downloads/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# 测试脚本与日志
+_*.py
+_*.log
+_*.png
+_*.jpeg
+
+# 编辑器
+.idea/
+.vscode/
+.ruff_cache/

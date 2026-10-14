@@ -48,8 +48,7 @@ uv run spankbang-dl --dry-run --limit 3
 uv run spankbang-dl --list-only
 
 # 指定输出目录
-uv run spankbang-dl --playlist "https://spankbang.com/xxxx/playlist/yyy/" \
-                    --outdir "D:\Videos"
+uv run spankbang-dl --playlist "https://spankbang.com/xxxx/playlist/yyy/" --outdir "D:\Videos"
 ```
 
 ### 支持的列表类型

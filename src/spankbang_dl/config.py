@@ -29,8 +29,8 @@ PART_SUFFIX = ".part"
 # 每个并行解析进程一份独立的 profile（Chrome 会锁 profile 目录，不能共用）
 DEFAULT_PROFILE_DIR = Path("profiles")
 # 现在每条都要开视频页解析身份，解析进程多一点总耗时才不至于太长
-DEFAULT_RESOLVERS = 4           # 并行 Chrome 进程数
-DEFAULT_WORKERS = 3             # 并行下载数
+DEFAULT_RESOLVERS = 10          # 并行 Chrome 进程数
+DEFAULT_WORKERS = 50            # 并行下载数
 
 CHROME_ARGS = [
     "--disable-blink-features=AutomationControlled",

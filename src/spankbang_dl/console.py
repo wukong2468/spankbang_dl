@@ -81,11 +81,26 @@ def note(text: str) -> None:
 
 
 def human_duration(seconds: float) -> str:
+    """秒数 -> 人能直接读的时长，例如 `3:50` / `1:02:03`。"""
     if not seconds or seconds <= 0:
         return "未知"
     total = int(seconds)
     h, m, s = total // 3600, (total % 3600) // 60, total % 60
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def human_size(num_bytes: float) -> str:
+    """字节数 -> 人能直接读的大小，例如 `150.76 MB`。"""
+    if num_bytes is None or num_bytes < 0:
+        return "未知"
+    size = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            if unit == "B":
+                return f"{int(size)} B"
+            return f"{size:.2f} {unit}"
+        size /= 1024
+    return f"{size:.2f} TB"
 
 
 def progress_bar(done: int, total: int, width: int = 22) -> str:

@@ -86,6 +86,11 @@ def download_http_file(
     """
     part = part_path or (dest + PART_SUFFIX)
     last_error = ""
+    # 断点卡死检测：实测某些视频，服务器每次都在同一个偏移处掐断连接，
+    # 于是「续传 -> 立刻失败 -> 再续传」原地打转，进度一点都不涨。
+    # 连续两次续传都没进展，就丢掉断点从头下。
+    stalled = 0
+    last_pos = -1
 
     for attempt in range(1, retries + 1):
         try:
@@ -96,9 +101,26 @@ def download_http_file(
         if attempt > 1:
             # 退避 + 抖动，避免多个线程同时重试把对方挤掉
             delay = min(2.0 ** attempt, 15.0) + random.uniform(0, 1.5)
+
+            if pos > 0 and pos == last_pos:
+                stalled += 1
+                if stalled >= 2:
+                    warn(f"断点原地不动（{pos / 1048576:.1f} MB），"
+                         f"丢弃断点从头下载…")
+                    try:
+                        os.remove(part)
+                    except OSError:
+                        pass
+                    pos = 0
+                    stalled = 0
+            else:
+                stalled = 0
+
             warn(f"第 {attempt}/{retries} 次重试"
                  f"{f'（从 {pos / 1048576:.1f} MB 续传）' if pos else ''}…")
             time.sleep(delay)
+
+        last_pos = pos
 
         headers = {
             "User-Agent": DOWNLOAD_UA,

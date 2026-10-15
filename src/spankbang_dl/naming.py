@@ -123,6 +123,9 @@ class FilenameAllocator:
         若磁盘上已存在 `{标题}.mp4` → 用 `{标题} - {stream_id}.mp4`
         否则                      → 用 `{标题}.mp4`
 
+    「磁盘上已存在」是**递归**判断的：下载好的视频常被手动归类到子目录里，
+    如果只看顶层，归类之后同名的视频又会拿到同一个名字，日后整理时就撞上了。
+
     同一个运行期内还要防止两条并发下载抢同一个名字，所以内部记着
     「已被占用的名字」，并且带锁。
     """
@@ -134,16 +137,11 @@ class FilenameAllocator:
         self._load_existing()
 
     def _load_existing(self) -> None:
-        """把目录里已有的文件名记下来（含 .part，避免和未完成的抢名字）。"""
-        try:
-            for entry in os.scandir(self.outdir):
-                try:
-                    if entry.is_file():
-                        self.taken.add(entry.name.lower())
-                except OSError:
-                    continue
-        except OSError:
-            pass
+        """递归记下目录里已有的文件名（含 .part，避免和未完成的抢名字）。"""
+        for _dirpath, dirnames, filenames in os.walk(self.outdir):
+            dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+            for name in filenames:
+                self.taken.add(name.lower())
 
     def exists(self, name: str) -> bool:
         return name.lower() in self.taken

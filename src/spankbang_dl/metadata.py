@@ -89,7 +89,12 @@ def write_source(path: str, stream_id: str, source: str) -> tuple[bool, str]:
 
 
 def read_source(path: str) -> dict | None:
-    """读回身份。读不到（没有标签 / 不是 MP4 / 文件损坏）返回 None。"""
+    """
+    读回身份。读不到（没有标签 / 不是 MP4 / 文件损坏）返回 None。
+
+    顺带把时长取出来——mutagen 构造 MP4 对象时本来就会解析 moov，
+    `info.length` 是白拿的，不额外花时间。
+    """
     if not str(path).lower().endswith(SCANNABLE_EXTS):
         return None
     try:
@@ -99,40 +104,63 @@ def read_source(path: str) -> dict | None:
         stream_id = _first(tags, TAG_ID)
         if not stream_id:
             return None
+        try:
+            duration = float(tags.info.length) if tags.info else 0.0
+        except Exception:
+            duration = 0.0
         return {
             "stream_id": stream_id,
             "source": _first(tags, TAG_SOURCE) or "",
+            "时长": duration,
         }
     except Exception as exc:
         logger.debug("读取 %s 的标签失败：%s", path, exc)
         return None
 
 
+def walk_videos(root: str):
+    """
+    递归遍历目录下所有视频文件，产出 `(相对路径, 绝对路径, DirEntry)`。
+
+    会跳过以 `.` 开头的目录（`.git` / `.venv` / `.tmp` 之类），
+    免得把无关的东西也扫一遍。
+    """
+    root = str(root)
+    if not os.path.isdir(root):
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        # 原地改 dirnames 才能真的阻止 os.walk 往下走
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for name in filenames:
+            if not name.lower().endswith(SCANNABLE_EXTS):
+                continue
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, root)
+            yield rel, full, name
+
+
 def scan_library(outdir: str) -> dict:
     """
-    扫保存目录，建一张 `{stream_id: 信息}` 的表。
+    递归扫描保存目录，建一张 `{stream_id: 信息}` 的表。
 
-    这就是「已经下载过什么」的权威来源——不看清单、不看文件名，
+    这就是「磁盘上已经有什么」的权威来源——不看清单、不看文件名，
     只看每个文件自己内嵌的 id。
+
+    **递归**：下载好的视频常被手动归类到子目录里，只扫顶层会漏掉。
+    `文件名` 只记纯文件名（不带目录），`相对路径` 另外记一份以便定位。
     """
     found: dict = {}
-    try:
-        entries = list(os.scandir(outdir))
-    except OSError as exc:
-        logger.warning("扫描目录失败：%s", exc)
-        return found
-
-    for entry in entries:
+    for rel, full, name in walk_videos(outdir):
         try:
-            if not entry.is_file() or not entry.name.lower().endswith(SCANNABLE_EXTS):
-                continue
-            info = read_source(entry.path)
+            info = read_source(full)
             if not info:
                 continue
-            info["文件名"] = entry.name
-            info["路径"] = entry.path
+            info["文件名"] = name
+            info["相对路径"] = rel
+            info["路径"] = full
+            info["文件状态"] = "在磁盘上"
             try:
-                info["文件大小"] = entry.stat().st_size
+                info["文件大小"] = os.path.getsize(full)
             except OSError:
                 info["文件大小"] = 0
             found[info["stream_id"]] = info
@@ -142,16 +170,14 @@ def scan_library(outdir: str) -> dict:
 
 
 def list_unidentified(outdir: str) -> list[str]:
-    """列出目录里没有身份标签的视频文件（手工放进去的、或老版本下的）。"""
+    """递归列出目录里没有身份标签的视频文件（手工放进去的、或老版本下的）。"""
     names = []
-    try:
-        for entry in os.scandir(outdir):
-            if not entry.is_file() or not entry.name.lower().endswith(SCANNABLE_EXTS):
-                continue
-            if read_source(entry.path) is None:
-                names.append(entry.name)
-    except OSError:
-        pass
+    for rel, full, _name in walk_videos(outdir):
+        try:
+            if read_source(full) is None:
+                names.append(rel)
+        except OSError:
+            continue
     return names
 
 
@@ -172,5 +198,6 @@ __all__ = [
     "part_name",
     "read_source",
     "scan_library",
+    "walk_videos",
     "write_source",
 ]

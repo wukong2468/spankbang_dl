@@ -31,10 +31,23 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import done as done_mod
 from . import interrupt, metadata
 from . import manifest as manifest_mod
 from .browser import ensure_writable_temp, open_browser
-from .console import C, fail, hr, human_duration, info, note, ok, progress_bar, step, warn
+from .console import (
+    C,
+    fail,
+    hr,
+    human_duration,
+    human_size,
+    info,
+    note,
+    ok,
+    progress_bar,
+    step,
+    warn,
+)
 from .downloader import download_http_file
 from .naming import (
     FilenameAllocator,
@@ -77,6 +90,7 @@ class RunState:
     started_at: float = 0.0
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active: dict = field(default_factory=dict)     # 正在下载的：id -> (已下, 总量)
+    done_entries: dict = field(default_factory=dict)   # 本次下完、待写进账本的
 
 
 class ProgressReporter:
@@ -291,6 +305,7 @@ async def _handle_item(item: dict, page, download_q: asyncio.Queue, state: RunSt
             "时长": result.get("duration") or 0,
             "文件大小": 0,
             "下载状态": "待下载",
+            "文件状态": "未完成",
         }
 
     part = os.path.join(str(args.outdir), metadata.part_name(title, stream_id))
@@ -347,6 +362,7 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
                 "文件大小": 0,
                 "下载状态": "试运行" if args.dry_run else "仅列直链",
                 "元数据写入": "",
+                "文件状态": "未完成",
             }
         marker = "试运行" if args.dry_run else "直链"
         print(f"  {C['green']}√ {marker}{C['reset']}  {stream_id:<10} "
@@ -390,6 +406,7 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
             })
             if stream_id in library:
                 library[stream_id]["下载状态"] = "失败"
+                library[stream_id]["文件状态"] = "未完成"
         print(f"    {C['red']}× 失败{C['reset']}  {error}  {filename[:40]}")
         return
 
@@ -403,7 +420,7 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
 
     async with state.lock:
         state.downloaded += 1
-        library[stream_id] = {
+        entry = {
             "标题": video["标题"],
             "文件名": filename,
             "来源": video["canonical"],
@@ -412,17 +429,23 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
             "文件大小": size,
             "下载状态": "完成",
             "元数据写入": "完成" if ok_meta else f"失败（{meta_err}）",
+            "文件状态": "在磁盘上",
         }
+        library[stream_id] = entry
+        # 记进账本：以后即使文件被移走/删掉，也不会再重下
+        state.done_entries[stream_id] = entry
 
-    print(f"    {C['green']}√ 完成{C['reset']}  {written / 1048576:>7.1f} MB  "
+    print(f"    {C['green']}√ 完成{C['reset']}  {human_size(written):>11}  "
           f"{elapsed:>6.1f}s  {speed:>5.1f} MB/s  {filename[:34]}")
     if not ok_meta:
         warn(f"    内嵌身份写入失败：{meta_err}")
 
 
 async def _manifest_writer(state: RunState, library: dict, path: str, args,
-                           playlist_total: int, stop: asyncio.Event) -> None:
-    """定期把清单落盘，中途 Ctrl+C 也不会丢记录。"""
+                           playlist_total: int, stop: asyncio.Event,
+                           done_file: str) -> None:
+    """定期把清单和账本落盘，中途 Ctrl+C 也不会丢记录。"""
+    done_count = 0
     while not stop.is_set():
         try:
             await asyncio.wait_for(stop.wait(), timeout=3.0)
@@ -431,8 +454,12 @@ async def _manifest_writer(state: RunState, library: dict, path: str, args,
             pass
         async with state.lock:
             data = manifest_mod.build_manifest(
-                args, playlist_total, state.queued, state, library, state.started_at)
+                args, playlist_total, state.queued, state, library, state.started_at,
+                done_count)
+            pending = dict(state.done_entries)
         manifest_mod.write_manifest(path, data)
+        if pending and not (args.dry_run or args.list_only):
+            good, _err, done_count = done_mod.merge_done(done_file, pending)
 
 
 # ------------------------------------------------------------------------------
@@ -515,20 +542,51 @@ async def run(args) -> int:
         return 3
 
     # ================================================================
-    # 第 3 步：扫描本地库 —— 只看文件自己内嵌的 id
+    # 第 3 步：收集「已经有什么」
+    #   ① 递归扫描保存目录，读每个视频内嵌的 stream id
+    #   ② 已下载完成.json ——只增不删的账本，补上「文件已经不在了」的情况
     # ================================================================
-    step(3, "扫描本地库（读每个视频内嵌的 stream id）")
-    library = metadata.scan_library(str(args.outdir))
+    step(3, "扫描本地库 + 读取已下载完成.json")
+    on_disk = metadata.scan_library(str(args.outdir))
+    library: dict = dict(on_disk)
+
     allocator = FilenameAllocator(str(args.outdir))
 
-    if library:
-        ok(f"本地已有 {C['bold']}{len(library)}{C['reset']} 个视频")
-        for sid, entry in sorted(library.items())[:5]:
-            note(f"{sid:<10} {entry.get('文件名', '')[:52]}")
-        if len(library) > 5:
-            note(f"…… 其余 {len(library) - 5} 个见清单")
+    if on_disk:
+        ok(f"磁盘上 {C['bold']}{len(on_disk)}{C['reset']} 个视频（已递归扫子目录）")
+        for sid in sorted(on_disk)[:5]:
+            note(f"{sid:<10} {on_disk[sid].get('文件名', '')[:52]}")
+        if len(on_disk) > 5:
+            note(f"…… 其余 {len(on_disk) - 5} 个见清单")
     else:
-        note("本地还没有带 id 标签的视频")
+        note("磁盘上还没有带 id 标签的视频")
+
+    done_file = done_mod.done_path(str(args.outdir), args.done_file)
+    done_records = done_mod.load_done(done_file)
+    only_done = 0
+    if not args.ignore_done:
+        for sid, entry in done_records.items():
+            if sid in library:
+                continue
+            only_done += 1
+            library[sid] = {
+                "标题": entry.get("标题", ""),
+                "文件名": entry.get("文件名", ""),
+                "来源": entry.get("来源", ""),
+                "来自列表": entry.get("来自列表", ""),
+                "下载状态": "已有",
+                "文件状态": "仅记录",
+            }
+
+    if done_records:
+        ok(f"账本 {C['bold']}{len(done_records)}{C['reset']} 条"
+           f"（其中 {only_done} 条磁盘上已没有文件）")
+    elif args.ignore_done:
+        warn("已按要求忽略账本（--ignore-done）")
+    else:
+        note("还没有账本文件（首次运行会新建）")
+
+    info("判定用的 id 总数", f"{len(library)}")
 
     orphans = metadata.list_unidentified(str(args.outdir))
     if orphans:
@@ -588,7 +646,8 @@ async def run(args) -> int:
             _download_worker(index, download_q, state, library, args, stop_thread)))
 
     writer = asyncio.create_task(
-        _manifest_writer(state, library, manifest_path, args, len(merged), stop_tasks))
+        _manifest_writer(state, library, manifest_path, args, len(merged), stop_tasks,
+                         done_file))
     reporter.start()
 
     try:
@@ -613,8 +672,19 @@ async def run(args) -> int:
     # 收尾
     # ================================================================
     async with state.lock:
+        pending = dict(state.done_entries)
+
+    done_count = len(done_records)
+    if pending and not (args.dry_run or args.list_only):
+        good, err, done_count = done_mod.merge_done(done_file, pending)
+        if good:
+            ok(f"已下载完成.json 已更新（本次新增/更新 {len(pending)} 条，共 {done_count} 条）")
+        else:
+            warn(f"写入已下载完成.json 失败：{err}")
+
+    async with state.lock:
         data = manifest_mod.build_manifest(
-            args, len(merged), state.queued, state, library, started_at)
+            args, len(merged), state.queued, state, library, started_at, done_count)
     manifest_mod.write_manifest(manifest_path, data)
 
     print()
@@ -631,11 +701,17 @@ async def run(args) -> int:
         print(f"  {C['green']}下载完成            {state.downloaded}{C['reset']}")
         if state.download_failed:
             print(f"  {C['red']}下载失败            {state.download_failed}{C['reset']}")
-    print(f"  本地视频总数        {data.get('本地视频总数', 0)}")
+    print(f"  磁盘上的视频        {data.get('其中：磁盘上真实存在', 0)}"
+          f"（递归扫子目录，含本次新下的）")
+    print(f"  仅在账本里的        {data.get('其中：仅记录在账本里', 0)}")
+    print(f"  账本条目            {done_count}")
+    print(f"  判定用 id 总数      {data.get('本地视频总数', 0)}")
     print(f"  总耗时              {time.time() - started_at:.1f} 秒")
     print(f"  清单文件            {manifest_path}")
+    print(f"  账本文件            {done_file}")
     hr("=")
-    note("是否下载只看文件内嵌的 stream id；清单不参与判断。")
+    note("是否下载只看文件内嵌的 stream id 与已下载完成.json；清单不参与判断。")
+    note("想重下某个视频：删掉文件，并把已下载完成.json 里对应的那条一起删掉。")
 
     if state.failed:
         print()

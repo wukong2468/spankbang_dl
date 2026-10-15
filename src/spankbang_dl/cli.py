@@ -19,6 +19,7 @@ from .config import (
     QUALITY_ORDER,
 )
 from .console import C, banner, fail, info, note, warn
+from .done import DEFAULT_DONE_FILE
 from .interrupt import install as install_interrupt_handler
 from .pipeline import run
 
@@ -64,6 +65,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tmp-dir", default=None,
                         help="Playwright 的临时目录（默认自动挑一个可写的，如 ./.tmp）")
     parser.add_argument("--manifest", default="下载清单.json", help="清单文件名")
+    parser.add_argument("--done-file", default=DEFAULT_DONE_FILE,
+                        help=f"已下载账本文件名（放在保存目录里，默认 {DEFAULT_DONE_FILE}）")
+    parser.add_argument("--ignore-done", action="store_true",
+                        help="忽略账本，只用扫描到的文件判断（删了文件就会被重下）")
     parser.add_argument("-v", "--verbose", action="store_true", help="输出调试日志")
     return parser
 

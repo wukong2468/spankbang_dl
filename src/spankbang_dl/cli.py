@@ -15,8 +15,10 @@ from pathlib import Path
 from .config import (
     DEFAULT_PROFILE_DIR,
     DEFAULT_RESOLVERS,
+    DEFAULT_SEGMENTS,
     DEFAULT_WORKERS,
     QUALITY_ORDER,
+    SEGMENT_MIN_BYTES,
 )
 from .console import C, banner, fail, info, note, warn
 from .done import DEFAULT_DONE_FILE
@@ -35,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  spankbang-dl --playlist https://spankbang.com/xxxx/playlist/yyy/\n"
             "  spankbang-dl --playlist \"网址1 网址2\"      # 空格分隔多个列表\n"
             "  spankbang-dl                                # 不指定则在控制台提示输入\n"
-            "  spankbang-dl --resolvers 6 --workers 5      # 加大并发\n"
+            "  spankbang-dl --resolvers 12 --workers 64    # 加大并发\n"
             "  spankbang-dl --dry-run --limit 3            # 只解析不下载\n"
             "  spankbang-dl --list-only                    # 只列直链\n"
         ),
@@ -51,8 +53,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resolvers", type=int, default=DEFAULT_RESOLVERS,
                         help=f"并行浏览器进程数（采集和解析都用，默认 {DEFAULT_RESOLVERS}）")
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
-                        help=f"并行下载数（默认 {DEFAULT_WORKERS}）；"
-                             "真正的瓶颈通常是带宽，并不是越大越快")
+                        help=f"全局并发连接上限（默认 {DEFAULT_WORKERS}）。"
+                             "视频多时等于「同时下几个」，视频少时会自动"
+                             "把单条直链切成多段来吃满带宽")
+    parser.add_argument("--segments", type=int, default=DEFAULT_SEGMENTS,
+                        help=f"单个文件最多切成几段（默认 {DEFAULT_SEGMENTS}）；"
+                             "实际段数还会按当时在下载的视频数均分，"
+                             "并且所有连接总数不超过 --workers")
+    parser.add_argument("--segment-min", type=int, default=SEGMENT_MIN_BYTES >> 20,
+                        metavar="MB",
+                        help=f"小于这个大小就不分段（单位 MB，默认 "
+                             f"{SEGMENT_MIN_BYTES >> 20}）")
+    parser.add_argument("--no-segment", action="store_true",
+                        help="关掉分段下载，每条直链只用一条连接")
     parser.add_argument("--prefer", default=None, choices=QUALITY_ORDER,
                         help="优先尝试的清晰度；缺失时自动向下回退。"
                              "只影响新视频，已下载的不会因为清晰度变化而重下")
@@ -199,7 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     info("浏览器", "Playwright + 系统 Chrome（有头）")
     info("浏览器进程", f"{args.resolvers} 个（采集与解析共用）")
     info("下载并发", f"{args.workers}")
-    if args.workers > 32:
+    if args.workers > DEFAULT_WORKERS:
         warn(f"下载并发 {args.workers} 偏高")
         note("真正的瓶颈通常是出口带宽：并发翻倍不会让总速度翻倍，"
              "反而会互相抢带宽，还可能被 CDN 限速。")
@@ -254,7 +267,8 @@ def _run_pipeline(args) -> int:
 
     # 关键：asyncio.to_thread 用的是 loop 的默认 executor，不显式设置的话
     # 上限永远是 min(32, cpu+4)，--workers 给多大都白搭。
-    pool_size = max(1, args.workers)
+    # 分段下载时一个文件会同时占多条线程，池子要留出余量给探测和收尾
+    pool_size = max(1, args.workers) + 4
     loop.set_default_executor(
         ThreadPoolExecutor(max_workers=pool_size, thread_name_prefix="dl")
     )

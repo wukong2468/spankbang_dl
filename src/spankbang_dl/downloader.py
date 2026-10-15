@@ -23,6 +23,7 @@ from .config import (
     DOWNLOAD_REFERER,
     DOWNLOAD_UA,
     PART_SUFFIX,
+    SEGMENT_RETRIES,
 )
 from .console import progress_bar, warn
 
@@ -200,9 +201,134 @@ def download_http_file(
     return False, last_error or "下载失败", 0
 
 
+# ==============================================================================
+# 分段下载
+#
+# 后期只剩少量视频时，一条连接吃不饱带宽。这里把单个直链切成若干区间并发拉，
+# 每个区间写进同一个文件的不同偏移处（独立句柄 seek 写），所以：
+#   * 不需要「每段一个文件再拼接」——省掉一次全量读写，峰值磁盘占用也只要 1 份
+#   * 并发总数由调用方用信号量统一封顶，这里只管下载
+# ==============================================================================
+
+def probe_range(url: str, referer: str = DOWNLOAD_REFERER,
+                timeout: float = 30.0) -> tuple[int, str]:
+    """
+    探测服务器是否支持 Range，顺便拿到总大小。
+
+    返回 `(总大小, 错误说明)`；总大小 > 0 表示支持分段。
+
+    做法是请求 `Range: bytes=0-0`：
+        206 + Content-Range: bytes 0-0/179438228  -> 支持，总大小 179438228
+        200                                       -> 不支持（老实退回单连接）
+        4xx / 异常                                -> 报错
+    """
+    headers = {
+        "User-Agent": DOWNLOAD_UA,
+        "Referer": referer,
+        "Accept": "*/*",
+        "Accept-Encoding": "identity",
+        "Range": "bytes=0-0",
+    }
+    try:
+        resp = open_url(urllib.request.Request(url, headers=headers), timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        # 有的服务器对 0-0 也回 416，那就当作不支持
+        if exc.code == 416:
+            return 0, "服务器不支持 Range（416）"
+        return 0, f"HTTP {exc.code} {exc.reason}"
+    except Exception as exc:
+        return 0, f"{type(exc).__name__}: {exc}"
+
+    with resp:
+        if resp.status != 206:
+            return 0, "服务器不支持 Range（返回 200）"
+        content_range = resp.headers.get("Content-Range") or ""
+        if "/" not in content_range:
+            return 0, "响应里没有 Content-Range"
+        try:
+            total = int(content_range.rsplit("/", 1)[1])
+        except ValueError:
+            return 0, f"Content-Range 解析失败：{content_range}"
+
+    if total <= 0:
+        return 0, "拿不到文件总大小"
+    return total, ""
+
+
+def download_range(url: str, path: str, start: int, end: int,
+                   referer: str = DOWNLOAD_REFERER,
+                   stop: threading.Event | None = None,
+                   on_bytes=None,
+                   retries: int = SEGMENT_RETRIES) -> tuple[bool, str, int]:
+    """
+    下载 `[start, end)` 区间，写进 `path` 的对应偏移处。
+
+    返回 (是否成功, 错误说明, 这次写入的字节数)。
+
+    每次都新开一个文件句柄 seek 过去再写，所以多个分段互不干扰，不需要加锁。
+    `end` 是**闭区间**（HTTP Range 的语义）。
+    """
+    want = end - start + 1
+    if want <= 0:
+        return True, "", 0
+
+    last_error = ""
+    for attempt in range(1, retries + 1):
+        if stop is not None and stop.is_set():
+            return False, "已中断", 0
+        if attempt > 1:
+            time.sleep(min(1.5 * attempt, 8.0) + random.uniform(0, 0.8))
+
+        headers = {
+            "User-Agent": DOWNLOAD_UA,
+            "Referer": referer,
+            "Accept": "*/*",
+            "Accept-Encoding": "identity",
+            "Range": f"bytes={start}-{end}",
+        }
+        try:
+            resp = open_url(urllib.request.Request(url, headers=headers), timeout=30)
+        except urllib.error.HTTPError as exc:
+            # 416 = 区间不被接受（有些 CDN 对部分偏移直接 404/416，实测过）
+            last_error = f"HTTP {exc.code} {exc.reason}"
+            continue
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            continue
+
+        written = 0
+        try:
+            with resp, open(path, "r+b") as handle:
+                handle.seek(start)
+                while True:
+                    if stop is not None and stop.is_set():
+                        raise DownloadCancelled()
+                    block = resp.read(CHUNK_SIZE)
+                    if not block:
+                        break
+                    handle.write(block)
+                    written += len(block)
+                    if on_bytes:
+                        on_bytes(len(block))
+        except DownloadCancelled:
+            return False, "已中断", written
+        except Exception as exc:
+            last_error = f"读取/写入失败：{type(exc).__name__}: {exc}"
+            continue
+
+        if written != want:
+            last_error = f"区间不完整（{written}/{want} 字节）"
+            continue
+        return True, "", written
+
+    return False, last_error or "分段下载失败", 0
+
+
 __all__ = [
     "DownloadCancelled",
     "download_http_file",
+    "download_range",
     "open_url",
+    "probe_range",
     "progress_bar",
 ]

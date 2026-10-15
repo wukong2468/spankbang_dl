@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import threading
@@ -35,6 +36,12 @@ from . import done as done_mod
 from . import interrupt, metadata
 from . import manifest as manifest_mod
 from .browser import ensure_writable_temp, open_browser
+from .config import (
+    SEGMENT_CHUNK_BYTES,
+    SEGMENT_FAIL_LIMIT,
+    SEGMENT_FLUSH_SECONDS,
+    SEGMENT_MIN_BYTES,
+)
 from .console import (
     C,
     fail,
@@ -48,7 +55,7 @@ from .console import (
     step,
     warn,
 )
-from .downloader import download_http_file
+from .downloader import download_http_file, download_range, probe_range
 from .naming import (
     FilenameAllocator,
     canonical_url,
@@ -91,6 +98,9 @@ class RunState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     active: dict = field(default_factory=dict)     # 正在下载的：id -> (已下, 总量)
     done_entries: dict = field(default_factory=dict)   # 本次下完、待写进账本的
+    active_downloads: int = 0     # 当前正在下载的视频数（用来分配每条直链分几段）
+    segmented: int = 0            # 本次采用分段下载的文件数
+    segment_peak: int = 0         # 实际用过的最大分段数（收尾时报告）
 
 
 class ProgressReporter:
@@ -325,8 +335,203 @@ async def _handle_item(item: dict, page, download_q: asyncio.Queue, state: RunSt
 # 第 3 阶段：下载
 # ------------------------------------------------------------------------------
 
+def _plan_segments(args, state: RunState) -> int:
+    """
+    决定这条直链切几段。
+
+    并发总数由 `--workers` 封顶，所以段数要按「同时在下几个视频」均分：
+
+        只剩 1 个视频、--workers 50、--segments 32  ->  32 段（吃满带宽）
+        剩 4 个视频                              ->  12 段
+        剩 100 个视频                            ->   1 段（等于以前的单连接）
+
+    这样视频多的时候行为完全不变，视频少了才自动提速。
+    """
+    max_segments = max(1, int(getattr(args, "segments", 1)))
+    active = max(1, state.active_downloads)
+    return max(1, min(max_segments, max(1, args.workers // active)))
+
+
+async def _download_segmented(url: str, dest: str, part: str, meta_path: str,
+                              total: int, max_segments: int, referer: str,
+                              stop: threading.Event, state: RunState,
+                              sem: asyncio.Semaphore, target_fn,
+                              on_total) -> tuple[bool, str, int]:
+    """
+    分块并发下载一条直链（并发数**动态伸缩**）。
+
+    为什么不是「一开始切成 N 段就不动了」
+    ------------------------------------
+    早先的实现是按开始那一刻的情况定死段数。但如果一开始有 100 个视频在下载，
+    每个只能分到 1 段；等小视频都下完了、带宽空出来了，剩下那几个大视频
+    仍然只有 1 段，白白闲着。所以改成：
+
+        把文件按 `SEGMENT_CHUNK_BYTES` 切成很多小块
+        一个监管协程每 2 秒重算一次「这条直链现在该占几条连接」
+        在跑的块任务不够就再起几个，够了就不起
+
+    这样并发数会跟着实际负载自动涨落。
+
+    落盘
+    ----
+    `part` 是数据文件（预先撑到 total 大小），每块用独立句柄 seek 到自己的偏移处写。
+    `meta_path` 记录哪些块已经下完，用于续传。
+
+    `sem` 是全局连接信号量——每块在真正发请求前先抢一个槽位，
+    保证所有直链的并发连接总数不超过 `--workers`。
+
+    返回 (是否成功, 错误说明, 已写入字节数)。
+    """
+    chunk = SEGMENT_CHUNK_BYTES
+    n_chunks = (total + chunk - 1) // chunk
+
+    # ---- 读续传信息（对不上就重来）----
+    done = set()
+    try:
+        with open(meta_path, encoding="utf-8") as handle:
+            saved = json.load(handle)
+        if (isinstance(saved, dict) and saved.get("total") == total
+                and saved.get("chunk") == chunk):
+            done = {int(i) for i in (saved.get("done") or []) if 0 <= int(i) < n_chunks}
+    except (OSError, ValueError, TypeError):
+        done = set()
+
+    # 数据文件撑到完整大小；大小对不上说明是旧文件，续传信息作废
+    try:
+        size = os.path.getsize(part) if os.path.isfile(part) else 0
+    except OSError:
+        size = 0
+    with open(part, "r+b" if size else "w+b") as handle:
+        if size != total:
+            handle.truncate(total)
+            done = set()
+
+    pending = [i for i in range(n_chunks) if i not in done]
+    lock = threading.Lock()
+    written = [len(done) * chunk]
+    abort = threading.Event()
+    failures = [0]
+    last_save = [0.0]
+
+    def save_meta(force: bool = False):
+        now = time.monotonic()
+        if not force and now - last_save[0] < 1.0:
+            return
+        last_save[0] = now
+        with lock:
+            snapshot = {"total": total, "chunk": chunk, "done": sorted(done)}
+        tmp = meta_path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(snapshot, handle)
+            os.replace(tmp, meta_path)
+        except OSError:
+            pass
+
+    save_meta(force=True)
+
+    async def download_chunk(index: int) -> bool:
+        start = index * chunk
+        end = min(total - 1, start + chunk - 1)
+        while not abort.is_set() and not (stop is not None and stop.is_set()):
+            # 本次尝试写进来的字节数。重试时要把它从总进度里扣掉，
+            # 否则失败的那几次会被重复计入，报出来的大小会比文件还大。
+            attempt = [0]
+
+            def bump(n, _box=attempt):
+                with lock:
+                    _box[0] += n
+                    written[0] += n
+
+            await sem.acquire()
+            try:
+                good, err, _n = await asyncio.to_thread(
+                    download_range, url, part, start, end, referer, stop, bump)
+            finally:
+                sem.release()
+
+            if good:
+                with lock:
+                    done.add(index)
+                failures[0] = 0
+                save_meta()
+                return True
+
+            with lock:
+                written[0] -= attempt[0]     # 这次没成，进度回退
+
+            if err == "已中断" or (stop is not None and stop.is_set()):
+                return False
+            failures[0] += 1
+            if failures[0] >= SEGMENT_FAIL_LIMIT:
+                # 实测有些 CDN 对某些偏移直接回 404/416，分段没法用 —— 整体退回单连接
+                abort.set()
+                return False
+        return False
+
+    inflight: dict[int, asyncio.Task] = {}
+    peak = [0]
+    try:
+        while True:
+            if abort.is_set() or (stop is not None and stop.is_set()):
+                break
+
+            # ---- 重算目标并发数，把不够的补上 ----
+            try:
+                target = max(1, min(max_segments, int(target_fn())))
+            except Exception:
+                target = max(1, max_segments)
+            while pending and len(inflight) < target:
+                index = pending.pop()
+                inflight[index] = asyncio.create_task(download_chunk(index))
+            peak[0] = max(peak[0], len(inflight))
+
+            if not inflight:
+                break            # 没有待下的块，也没有在跑的 -> 收工
+
+            finished, _ = await asyncio.wait(
+                list(inflight.values()), timeout=SEGMENT_FLUSH_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED)
+            for index in [i for i, task in inflight.items() if task.done()]:
+                inflight.pop(index, None)
+
+            with lock:
+                state.segment_peak = max(state.segment_peak, len(inflight))
+                on_total(written[0], total)
+            save_meta()
+
+        if abort.is_set():
+            return False, "分段不被服务器接受，回退单连接", written[0]
+
+        # 收尾：等在跑的块结束（中断时也要等，好把进度记下来）
+        if inflight:
+            await asyncio.gather(*inflight.values(), return_exceptions=True)
+
+        if stop is not None and stop.is_set():
+            save_meta(force=True)
+            return False, "已中断（进度已保存，可续传）", written[0]
+
+        if len(done) < n_chunks:
+            save_meta(force=True)
+            return False, f"还有 {n_chunks - len(done)} 块没下完", written[0]
+
+        try:
+            os.remove(meta_path)
+        except OSError:
+            pass
+        try:
+            os.replace(part, dest)
+        except OSError as exc:
+            return False, f"改名失败：{exc}", written[0]
+        return True, "", written[0]
+    finally:
+        for task in inflight.values():
+            task.cancel()
+
+
 async def _download_worker(index: int, download_q: asyncio.Queue, state: RunState,
-                           library: dict, args, stop: threading.Event) -> None:
+                           library: dict, args, stop: threading.Event,
+                           sem: asyncio.Semaphore) -> None:
     while True:
         if interrupt.stop_requested():
             return
@@ -338,13 +543,13 @@ async def _download_worker(index: int, download_q: asyncio.Queue, state: RunStat
             download_q.task_done()
             return
         try:
-            await _do_download(index, video, state, library, args, stop)
+            await _do_download(index, video, state, library, args, stop, sem)
         finally:
             download_q.task_done()
 
 
 async def _do_download(index: int, video: dict, state: RunState, library: dict,
-                       args, stop: threading.Event) -> None:
+                       args, stop: threading.Event, sem: asyncio.Semaphore) -> None:
     dest = video["文件路径"]
     part = video["断点路径"]
     filename = video["文件名"]
@@ -376,22 +581,76 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
             head = os.path.getsize(part)
         except OSError:
             head = 0
+
+    # ---- 决定这条直链要不要分段 ----
+    segments = _plan_segments(args, state)
+    meta_path = part + ".json"
+    total_size = 0
+    use_segments = segments > 1 and not args.no_segment
+
+    if use_segments:
+        total_size, probe_err = await asyncio.to_thread(
+            probe_range, video["url"], video.get("page_url") or "")
+        if total_size <= 0:
+            use_segments = False
+            if probe_err:
+                logger.debug("不分段（%s）：%s", stream_id, probe_err)
+        elif total_size < max(SEGMENT_MIN_BYTES, getattr(args, "segment_min", 0)):
+            use_segments = False
+
+    if use_segments:
+        # 每块至少 1 MB，免得小文件被切成一堆碎片
+        from .config import CHUNK_SIZE
+
+        segments = max(1, min(segments, max(1, total_size // CHUNK_SIZE)))
+        if segments <= 1:
+            use_segments = False
+
+    plan = f"  {C['magenta']}分段并发（最多 {segments}）{C['reset']}" if use_segments else ""
     resume = f"  断点 {head / 1048576:.1f} MB" if head else ""
     print(f"  {C['green']}→ 下载 {index}{C['reset']}  {stream_id:<10} "
           f"{human_duration(video.get('duration') or 0):>7}  "
-          f"{video['标题'][:34]}{resume}")
+          f"{video['标题'][:34]}{plan}{resume}")
 
     t0 = time.time()
 
     def on_progress(done, total):
         state.active[stream_id] = (done, total)
 
+    def target_segments() -> int:
+        """这条直链此刻该占几条连接 —— 监管协程每 2 秒问一次，所以会动态涨落。"""
+        return _plan_segments(args, state)
+
+    async with state.lock:
+        state.active_downloads += 1
     try:
-        good, error, written = await asyncio.to_thread(
-            download_http_file, video["url"], dest, video.get("page_url") or "",
-            stop, on_progress, 5, part)
+        if use_segments:
+            good, error, written = await _download_segmented(
+                video["url"], dest, part, meta_path, total_size, segments,
+                video.get("page_url") or "", stop, state, sem, target_segments,
+                on_progress)
+            async with state.lock:
+                if good:
+                    state.segmented += 1
+            if not good and error.startswith("分段不被服务器接受"):
+                warn(f"    {error}，改为单连接重下")
+                for path in (part, meta_path):
+                    try:
+                        os.remove(path)
+                    except OSError:
+                        pass
+                good, error, written = await asyncio.to_thread(
+                    download_http_file, video["url"], dest,
+                    video.get("page_url") or "", stop, on_progress, 5, part)
+        else:
+            good, error, written = await asyncio.to_thread(
+                download_http_file, video["url"], dest, video.get("page_url") or "",
+                stop, on_progress, 5, part)
     except Exception as exc:
         good, error, written = False, f"{type(exc).__name__}: {exc}", 0
+    finally:
+        async with state.lock:
+            state.active_downloads = max(0, state.active_downloads - 1)
 
     state.active.pop(stream_id, None)
     elapsed = max(0.001, time.time() - t0)
@@ -640,10 +899,13 @@ async def run(args) -> int:
             resolve_workers.append(asyncio.create_task(
                 _resolve_worker(index, headless, profile_root, resolve_q, download_q,
                                 state, library, allocator, args)))
+    # 全局连接信号量：所有直链 + 所有分段的并发连接总数不超过 --workers
+    sem = asyncio.Semaphore(max(1, args.workers))
+
     download_workers: list[asyncio.Task] = []
     for index in range(1, args.workers + 1):
         download_workers.append(asyncio.create_task(
-            _download_worker(index, download_q, state, library, args, stop_thread)))
+            _download_worker(index, download_q, state, library, args, stop_thread, sem)))
 
     writer = asyncio.create_task(
         _manifest_writer(state, library, manifest_path, args, len(merged), stop_tasks,

@@ -1,5 +1,18 @@
 # spankbang-dl
 
+> ## ⚠️ 免责声明
+>
+> **本项目仅供个人学习与技术研究使用，严禁用于任何违法用途。**
+>
+> - 使用者须自行确保其行为符合所在地法律法规；因使用本项目产生的**一切后果由使用者自负**，
+>   作者不承担任何责任。
+> - 本项目只是一个**通用下载工具**，不提供、不存储、不传播任何内容。
+> - 下载所得内容**仅供个人私下观看**，请勿再上传或分发。
+> - 目标站点为**成人内容网站**，未满 18 岁或所在地法律禁止者不得使用。
+>
+> **继续使用即表示你已阅读、理解并同意下方 [完整免责声明](#免责声明disclaimer) 的全部条款。**
+> 如不同意任何一条，请立即停止使用并删除本项目。
+
 批量采集 SpankBang 的**播放列表**和**搜索列表**，解析每个视频的最高清晰度直链，
 并行下载到本地。
 
@@ -574,5 +587,74 @@ packaging/
                               追加进 已下载完成.json
 ```
 
-      id 不在   → 解析直链 → 下载 → 写入 id + 直链
-```
+## 免责声明（Disclaimer）
+
+### 中文
+
+**本项目仅供个人学习、技术研究与技术交流使用。**
+
+1. **禁止任何违法用途。** 不得利用本项目从事任何违反使用者所在国家或地区法律法规的
+   活动，包括但不限于：侵犯著作权、传播违法或有害信息、规避技术保护措施、
+   未经授权批量获取他人作品等。
+
+2. **本项目只是通用工具。** 它不提供、不存储、不托管、不传播任何音视频内容，
+   也不对目标站点的内容做任何筛选或背书。所下载内容的一切权利归原权利人所有。
+
+3. **不得再传播。** 下载所得内容仅供个人私下观看，请勿上传、分享、出售或以任何
+   形式再分发。
+
+4. **年龄限制。** 目标站点为成人内容网站，未满 18 周岁或未达所在地法定年龄者
+   不得使用本项目。
+
+5. **地域限制。** 该类内容在部分国家和地区属于违法或受限制内容。使用者应在访问前
+   自行确认所在地法律是否允许，并承担由此产生的一切后果。
+
+6. **风险自负。** 使用本项目所产生的一切直接或间接后果——包括但不限于账号封禁、
+   IP 或设备被限制、网络服务中断、数据或设备损坏、法律纠纷与处罚——均由
+   **使用者自行承担**，作者不承担任何责任。
+
+7. **无担保。** 本项目按「现状（AS IS）」提供，不附带任何明示或暗示的担保，
+   包括但不限于对适销性、特定用途适用性及非侵权的保证。作者不保证本项目
+   可用、无错误或不会造成损失。
+
+8. **作者保留权利。** 作者可随时修改、暂停或终止本项目及本声明，恕不另行通知。
+
+9. **不同意即停止使用。** 如果你不同意上述任何一条，请立即停止使用并删除本项目
+   及其全部副本。
+
+### English
+
+**This project is provided for personal study and technical research only.**
+
+1. **No illegal use.** You must not use this project for any activity that violates the
+   laws or regulations of your jurisdiction, including but not limited to copyright
+   infringement, distributing unlawful content, or circumventing technical protection
+   measures.
+
+2. **This is a generic tool.** It does not host, store, provide, or distribute any media
+   content, and it neither filters nor endorses the content of any target site. All
+   rights to downloaded material remain with the respective rights holders.
+
+3. **Do not redistribute.** Downloaded material is for private, personal viewing only.
+   Do not upload, share, sell, or otherwise redistribute it.
+
+4. **Age restriction.** The target site hosts adult content. You must be at least 18 years
+   old, or of the legal age in your jurisdiction, to use this project.
+
+5. **Regional restrictions.** Such content may be illegal or restricted in some countries
+   and regions. You are responsible for verifying that your use is lawful where you are.
+
+6. **Use at your own risk.** The author accepts **no responsibility or liability** for any
+   direct or indirect consequence of using this project, including but not limited to
+   account bans, IP or device restrictions, service interruptions, data or hardware
+   damage, and legal disputes or penalties.
+
+7. **No warranty.** This project is provided "AS IS", without warranty of any kind,
+   express or implied, including but not limited to the warranties of merchantability,
+   fitness for a particular purpose, and non-infringement.
+
+8. **Reservation of rights.** The author may modify, suspend, or discontinue this project
+   and this disclaimer at any time without notice.
+
+9. **If you disagree, stop using it.** If you do not agree with any of the above, please
+   stop using this project immediately and delete it together with all copies.

@@ -231,6 +231,9 @@ async def resolve_video(page, href: str, prefer: str | None = None,
             "quality": quality,
             "stream_id": str(info.get("streamId") or "") or None,
             "duration": info.get("playerDuration") or info.get("length") or 0,
+            # 视频播放页地址，例如 https://spankbang.com/9pf3w/video/xxx
+            # 只用来记录 / 方便回看，**不作为身份**（slug 会随标题变）
+            "page_url": info.get("url") or page.url,
         }
 
     return {"error": last_error or "解析失败", "page_url": url}

@@ -58,7 +58,6 @@ from .console import (
 from .downloader import download_http_file, download_range, probe_range
 from .naming import (
     FilenameAllocator,
-    canonical_url,
     sanitize_filename,
     stream_id_of,
 )
@@ -297,7 +296,9 @@ async def _handle_item(item: dict, page, download_q: asyncio.Queue, state: RunSt
         print(f"  {C['red']}× 无法识别 id{C['reset']}  {title[:40]}")
         return
 
-    canonical = canonical_url(url)
+    # `url` 是带签名的完整直链，能直接访问下载。之前这里存的是去掉查询串的
+    # 「规范直链」，那个地址访问不了（缺 secure 令牌），清单里看着像直链其实没用。
+    page_url = result.get("page_url") or ""
 
     async with state.lock:
         state.resolved += 1
@@ -310,8 +311,9 @@ async def _handle_item(item: dict, page, download_q: asyncio.Queue, state: RunSt
         library[stream_id] = {
             "标题": title,
             "文件名": filename,
-            "来源": canonical,
-            "来源列表": item.get("来源列表", ""),
+            "来源": url,
+            "来自列表": item.get("来源列表", ""),
+            "视频播放页": page_url,
             "时长": result.get("duration") or 0,
             "文件大小": 0,
             "下载状态": "待下载",
@@ -323,7 +325,8 @@ async def _handle_item(item: dict, page, download_q: asyncio.Queue, state: RunSt
     video = dict(result)
     video.update({
         "stream_id": stream_id,
-        "canonical": canonical,
+        "直链": url,
+        "视频播放页": page_url,
         "文件名": filename,
         "文件路径": os.path.join(str(args.outdir), filename),
         "断点路径": part,
@@ -561,8 +564,9 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
             library[stream_id] = {
                 "标题": video["标题"],
                 "文件名": filename,
-                "来源": video["canonical"],
-                "来源列表": video.get("来源列表", ""),
+                "来源": video["直链"],
+                "来自列表": video.get("来源列表", ""),
+                "视频播放页": video.get("视频播放页", ""),
                 "时长": video.get("duration") or 0,
                 "文件大小": 0,
                 "下载状态": "试运行" if args.dry_run else "仅列直链",
@@ -572,7 +576,7 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
         marker = "试运行" if args.dry_run else "直链"
         print(f"  {C['green']}√ {marker}{C['reset']}  {stream_id:<10} "
               f"{human_duration(video.get('duration') or 0):>7}  {video['标题'][:34]}")
-        note(video["canonical"][:112])
+        note(video["直链"][:112])
         return
 
     head = 0
@@ -670,7 +674,7 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
         return
 
     # ---- 成功后写内嵌身份（id + 直链）----
-    ok_meta, meta_err = metadata.write_source(dest, stream_id, video["canonical"])
+    ok_meta, meta_err = metadata.write_source(dest, stream_id, video["直链"])
 
     try:
         size = os.path.getsize(dest)
@@ -682,8 +686,9 @@ async def _do_download(index: int, video: dict, state: RunState, library: dict,
         entry = {
             "标题": video["标题"],
             "文件名": filename,
-            "来源": video["canonical"],
-            "来源列表": video.get("来源列表", ""),
+            "来源": video["直链"],
+            "来自列表": video.get("来源列表", ""),
+            "视频播放页": video.get("视频播放页", ""),
             "时长": video.get("duration") or 0,
             "文件大小": size,
             "下载状态": "完成",
@@ -833,9 +838,19 @@ async def run(args) -> int:
                 "文件名": entry.get("文件名", ""),
                 "来源": entry.get("来源", ""),
                 "来自列表": entry.get("来自列表", ""),
+                "视频播放页": entry.get("视频播放页", ""),
                 "下载状态": "已有",
                 "文件状态": "仅记录",
             }
+
+        # 磁盘上已经有文件的，如果账本里记了「视频播放页」，也一并补上
+        # （内嵌标签里没存这个地址，只能从账本取）
+        for sid, _entry in library.items():
+            if _entry.get("视频播放页"):
+                continue
+            recorded = done_records.get(sid) or {}
+            if recorded.get("视频播放页"):
+                _entry["视频播放页"] = recorded["视频播放页"]
 
     if done_records:
         ok(f"账本 {C['bold']}{len(done_records)}{C['reset']} 条"

@@ -25,11 +25,14 @@
       "分辨率": "1080p",
       "标题": "...",
       "文件名": "...mp4",
-      "来源": "https://vdownload-45.sb-cd.com/1/7/17026324-1080p.mp4",
+      "来源": "https://vdownload-45.sb-cd.com/1/7/17026324-1080p.mp4?secure=...&_tid=17026324",
       "来自列表": "https://zh.spankbang.com/dup8k/playlist/ai+porn",
+      "视频播放页": "https://spankbang.com/9pf3w/video/xxx",
       "时长": "3:50",
       "文件大小": "150.76 MB"
     }
+
+`来源` 存的是**带签名的完整直链**，可以直接拿来下载（签名约 12 小时后失效）。
 
 写入策略是**合并，不是重建**：以现有内容为底，只更新/新增本次下载的 id，
 没碰过的条目原样保留（连字段顺序都不动），免得把手工整理的内容弄坏。
@@ -49,7 +52,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_DONE_FILE = "已下载完成.json"
 
 # 条目字段顺序（写出来的 JSON 就按这个顺序，方便人看）
-FIELDS = ("分辨率", "标题", "文件名", "来源", "来自列表", "时长", "文件大小")
+FIELDS = ("分辨率", "标题", "文件名", "来源", "来自列表", "视频播放页", "时长", "文件大小")
 
 
 def done_path(outdir: str, name: str = DEFAULT_DONE_FILE) -> str:
@@ -93,6 +96,7 @@ def build_entry(info: dict) -> dict:
         "文件名": info.get("文件名", ""),
         "来源": source,
         "来自列表": info.get("来自列表") or info.get("来源列表", ""),
+        "视频播放页": info.get("视频播放页", ""),
         "时长": human_duration(info.get("时长") or 0),
         "文件大小": human_size(size),
     }

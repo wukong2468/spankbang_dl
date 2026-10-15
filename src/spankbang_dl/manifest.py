@@ -51,8 +51,11 @@ def build_manifest(args, playlist_total: int, queued: int, state,
             "分辨率": resolution_of(source) or info.get("分辨率", ""),
             "标题": info.get("标题") or os.path.splitext(filename)[0],
             "文件名": filename,
+            # 带签名的完整直链，能直接拿来下载（不过签名约 12 小时后失效）
             "来源": source,
             "来自列表": info.get("来自列表") or info.get("来源列表", ""),
+            # 视频播放页地址，方便回看原始页面（只作记录，不作为身份）
+            "视频播放页": info.get("视频播放页", ""),
             # 时长和文件大小都用人类可读的字符串
             "时长": human_duration(info.get("时长") or 0),
             "文件大小": human_size(info.get("文件大小") or 0),

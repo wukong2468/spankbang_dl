@@ -26,3 +26,8 @@ _*.jpeg
 .idea/
 .vscode/
 .ruff_cache/
+
+# 打包产物
+build/
+dist/
+*.spec.bak

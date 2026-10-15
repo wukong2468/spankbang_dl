@@ -20,7 +20,7 @@ from .config import (
     QUALITY_ORDER,
     SEGMENT_MIN_BYTES,
 )
-from .console import C, banner, fail, info, note, warn
+from .console import C, banner, fail, info, note, setup_console, warn
 from .done import DEFAULT_DONE_FILE
 from .interrupt import install as install_interrupt_handler
 from .pipeline import run
@@ -187,6 +187,9 @@ def _ask_for_playlist(preset: list[str] | None) -> list[str] | None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # 第一件事就是把控制台切成 UTF-8，否则后面所有中文输出都是乱码
+    setup_console()
+
     args = build_parser().parse_args(argv)
 
     logging.basicConfig(

@@ -7,6 +7,31 @@ import sys
 
 LINE_WIDTH = 84
 
+
+def setup_console() -> None:
+    """
+    让中文能在 Windows 控制台里正常显示。
+
+    默认代码页是 936(GBK)，Python 的 `sys.stdout` 会跟着用 gbk。这时候打印
+    中文+符号（√ × ～）会变成乱码，双击打包好的 exe 尤其明显。
+    所以进 main() 的第一件事就是：把控制台代码页切成 UTF-8，并把两个流
+    重新配置成 utf-8。
+    """
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleOutputCP(65001)
+            kernel32.SetConsoleCP(65001)
+        except Exception:
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
 _COLORS = {
     "reset": "\033[0m",
     "dim": "\033[2m",

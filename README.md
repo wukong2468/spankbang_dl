@@ -28,6 +28,62 @@
 uv sync
 ```
 
+## 打包成 exe
+
+不想装 Python 环境的话，可以打包成一个**免安装目录**分发给别人。
+
+```bash
+uv sync                                    # 包含 dev 依赖（pyinstaller）
+uv run pyinstaller spankbang-dl.spec --noconfirm --clean
+```
+
+产物在 `dist/spankbang-dl/`：
+
+```
+dist/spankbang-dl/
+├── spankbang-dl.exe      3.4 MB     ← 双击这个
+└── _internal/            126 MB     ← 依赖都在这儿，整个文件夹一起拷
+                          129.5 MB 合计
+```
+
+### 为什么是这个体积
+
+| 部分 | 大小 | 说明 |
+|---|---|---|
+| **Playwright 的 Node 驱动** | 101 MB | 必需。驱动真实 Chrome 的那层 |
+| Python 运行时 + 标准库 | ~20 MB | |
+| pathvalidate / mutagen / 本项目 | ~2 MB | |
+
+**Playwright 自带的浏览器（chromium/firefox/webkit，1.1 GB）没有打包** ——
+本项目用 `channel="chrome"` 驱动**系统装的 Google Chrome**，所以一个字节都不用带。
+
+### ⚠️ 分发时要注意
+
+1. **目标机器必须装了 Google Chrome。** 没装的话会在启动浏览器时报错，
+   脚本会提示「请确认系统装了 Google Chrome」。
+
+2. **必须整个 `dist/spankbang-dl/` 文件夹一起拷贝**，不能只拿那个 exe。
+
+3. **为什么是文件夹而不是单个 exe**：如果用 onefile，每次启动都要把 129 MB
+   解压到 `%TEMP%\_MEIxxxx`（慢 3~8 秒），而且 Playwright 要拉起 Node 驱动的
+   子进程，路径每次都变容易出问题。onedir 启动快、也稳。
+
+4. 首次运行会在**当前工作目录**下建 `profiles/`（浏览器 profile，体积不小）
+   和 `Downloads/`（下载目录）。双击运行时工作目录就是 exe 所在目录。
+
+### 改了代码之后重新打包
+
+`--clean` 已经清掉上次的缓存，直接重跑上面那条命令即可。
+
+### 打包相关的文件
+
+| 文件 | 作用 |
+|---|---|
+| `spankbang-dl.spec` | PyInstaller 配置（收集 playwright 驱动、排除用不到的东西） |
+| `packaging/entry.py` | exe 的入口。用绝对导入，因为 PyInstaller 把入口脚本当顶层模块 |
+| `console.setup_console()` | 把控制台代码页切成 UTF-8，否则中文是乱码 |
+
+
 ## 使用
 
 ```bash
@@ -490,6 +546,9 @@ src/spankbang_dl/
 ├── naming.py        文件名清洗、直链解析、文件名分配
 ├── manifest.py      运行清单（以 stream id 为键）
 └── pipeline.py      主流程编排（采集池 + 解析池 + 下载池）
+
+packaging/
+└── entry.py         exe 打包入口（绝对导入）
 ```
 
 ## 主流程
